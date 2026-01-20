@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import ssl
 import smtplib
 import urllib.request
@@ -16,7 +17,14 @@ from zoneinfo import ZoneInfo
 
 # -------------------- helpers --------------------
 def fetch_json(url: str):
-    with urllib.request.urlopen(url, timeout=20) as r:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "AuroraAlert/1.0 (+https://services.swpc.noaa.gov)",
+            "Accept": "application/json,text/plain,*/*",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -66,8 +74,11 @@ def parse_noaa_time_utc(time_tag: str) -> Optional[datetime]:
         "%Y-%m-%d %H:%M:%S.%f",
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S.%fZ",
         "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%dT%H:%MZ",
+        "%Y-%m-%dT%H:%M",
     ):
         try:
             return datetime.strptime(time_tag, fmt).replace(tzinfo=timezone.utc)
@@ -146,7 +157,7 @@ def send_gmail(
 # -------------------- NOAA data sources --------------------
 KP_NOW_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
 KP_FORECAST_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"
-NOWCAST_URL = "https://services.swpc.noaa.gov/products/noaa-estimated-planetary-k-index-1-minute.json"
+NOWCAST_URL = "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json"
 
 
 
@@ -158,18 +169,122 @@ def kp_now() -> Tuple[float, str]:
 
 # Near real-time estimated planetary K index (1-minute)
 def kp_nowcast(url: str = NOWCAST_URL) -> Tuple[Optional[float], Optional[str]]:
-    """Near real-time estimated planetary K index (1-minute). Returns (kp, time_tag) or (None, None) if unavailable."""
+    """Near real-time estimated planetary K index (1-minute).
+
+    Supports multiple SWPC JSON formats.
+    Returns (kp, time_tag) or (None, None) if unavailable.
+
+    Set NOWCAST_DEBUG=1 in .env to log parsing details.
+    """
+    debug = os.getenv("NOWCAST_DEBUG", "0").strip() == "1"
+
     try:
         data = fetch_json(url)
-        # expected format: header row + rows like ["time_tag", "kp", ...]
-        rows = data[1:] if data and isinstance(data[0], list) else data
-        if not rows:
-            return None, None
-        last = rows[-1]
-        if not last or len(last) < 2:
-            return None, None
-        return float(last[1]), str(last[0])
-    except Exception:
+
+        def to_kp_float(v) -> Optional[float]:
+            """Convert NOAA nowcast value to float.
+
+            Some feeds may return strings like '6P' or '7.3+'; we extract the leading number.
+            """
+            if v is None:
+                return None
+            if isinstance(v, (int, float)):
+                return float(v)
+            if isinstance(v, str):
+                s = v.strip().replace(",", ".")
+                m = re.search(r"[-+]?(?:\d+\.?\d*|\d*\.?\d+)", s)
+                if not m:
+                    return None
+                try:
+                    return float(m.group(0))
+                except ValueError:
+                    return None
+            return None
+
+        def pick_from_list_of_dicts(items: list) -> Tuple[Optional[float], Optional[str]]:
+            if not items:
+                return None, None
+            last = items[-1]
+            if not isinstance(last, dict):
+                return None, None
+
+            # common key variants
+            kp_val = None
+            for k in ("kp", "estimated_kp", "k_index", "kp_index", "kp_value", "value"):
+                if k in last and last.get(k) is not None:
+                    kp_val = last.get(k)
+                    break
+
+            time_val = None
+            for k in ("time_tag", "time", "datetime", "timestamp", "date"):
+                if k in last and last.get(k) is not None:
+                    time_val = last.get(k)
+                    break
+
+            if kp_val is None or time_val is None:
+                return None, None
+            kp_f = to_kp_float(kp_val)
+            if kp_f is None:
+                return None, None
+            return kp_f, str(time_val)
+
+        # Format A: header row + rows like ["time_tag", "kp", ...]
+        if isinstance(data, list) and data and isinstance(data[0], list):
+            rows = data[1:]
+            if not rows:
+                return None, None
+            last = rows[-1]
+            if not last or len(last) < 2:
+                return None, None
+            kp_f = to_kp_float(last[1])
+            if kp_f is None:
+                return None, None
+            return kp_f, str(last[0])
+
+        # Format B: list of dicts
+        if isinstance(data, list) and (not data or isinstance(data[0], dict)):
+            kp, t = pick_from_list_of_dicts(data)
+            if debug:
+                print("NOWCAST_DEBUG: list-of-dicts", "kp=", kp, "time=", t)
+            return kp, t
+
+        # Format C: dict wrapper, common patterns like {"data": [...]} or {"k_index": [...]}
+        if isinstance(data, dict):
+            # try typical container keys
+            for container_key in ("data", "values", "k_index", "planetary_k_index", "results"):
+                if container_key in data and isinstance(data[container_key], list):
+                    kp, t = pick_from_list_of_dicts(data[container_key])
+                    if debug:
+                        print("NOWCAST_DEBUG: dict-wrapper key=", container_key, "kp=", kp, "time=", t)
+                    return kp, t
+
+            # sometimes the dict itself is a single record
+            if debug:
+                print("NOWCAST_DEBUG: dict-keys", list(data.keys())[:20])
+            kp_val = None
+            for k in ("kp", "estimated_kp", "k_index", "kp_index", "kp_value", "value"):
+                if k in data and data.get(k) is not None:
+                    kp_val = data.get(k)
+                    break
+            time_val = None
+            for k in ("time_tag", "time", "datetime", "timestamp", "date"):
+                if k in data and data.get(k) is not None:
+                    time_val = data.get(k)
+                    break
+            if kp_val is None or time_val is None:
+                return None, None
+            kp_f = to_kp_float(kp_val)
+            if kp_f is None:
+                return None, None
+            return kp_f, str(time_val)
+
+        if debug:
+            print("NOWCAST_DEBUG: unknown type", type(data))
+        return None, None
+
+    except Exception as e:
+        if debug:
+            print("NOWCAST_DEBUG: exception", repr(e))
         return None, None
 
 
@@ -659,7 +774,6 @@ def main():
     nowcast_time: Optional[str] = None
     if nowcast_enabled:
         nowcast_kp, nowcast_time = kp_nowcast()
-
     send_now_flag = False
     send_forecast_flag = False
     best_cloud: Optional[int] = None

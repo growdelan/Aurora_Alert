@@ -1,6 +1,6 @@
-# Aurora Alert (Wałbrzych / PL) — NOAA Kp + Forecast + Meteo Gate + Gmail (HTML)
+# Aurora Alert (Miasto / PL) — NOAA Kp + Forecast + Meteo Gate + Gmail (HTML)
 
-Mały, “produkcyjny” skrypt w Pythonie do wysyłania **alertów o szansach na zorzę** dla konkretnej lokalizacji (domyślnie Wałbrzych), z **profesjonalnym mailem HTML**.
+Mały, “produkcyjny” skrypt w Pythonie do wysyłania **alertów o szansach na zorzę** dla konkretnej lokalizacji, z **profesjonalnym mailem HTML**.
 
 Skrypt cyklicznie pobiera:
 - **NOAA SWPC**: Kp (observed) + Kp (forecast)

@@ -56,8 +56,8 @@ Mail FORECAST poleci, gdy spełnione są wszystkie:
 
 Przykład:
 ```bash
-mkdir -p /home/gohan/LLM/aurora_alert
-cd /home/gohan/LLM/aurora_alert
+mkdir -p /home/user/app/aurora_alert
+cd /home/user/app/aurora_alert
 # wrzuć tu aurora_alert.py + README.md
 ```
 
@@ -85,8 +85,8 @@ GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
 ALERT_TO=adres1@domena.pl,adres2@domena.pl
 
 # --- Lokalizacja ---
-LAT=50.77
-LON=16.28
+LAT=51.06
+LON=17.02
 TZ=Europe/Warsaw
 
 # --- Progi ---
@@ -119,14 +119,14 @@ W Gmailu użyj **App Password** zamiast normalnego hasła:
 ## Uruchomienie ręczne
 
 ```bash
-cd /home/gohan/LLM/aurora_alert
-/home/gohan/LLM/aurora_alert/.venv/bin/python aurora_alert.py
+cd /home/user/app/aurora_alert
+/home/user/app/aurora_alert/.venv/bin/python aurora_alert.py
 ```
 
 Jeśli chcesz zapisać output do loga jak cron:
 
 ```bash
-/home/gohan/LLM/aurora_alert/.venv/bin/python aurora_alert.py >> aurora.log 2>&1
+/home/user/app/aurora_alert/.venv/bin/python aurora_alert.py >> aurora.log 2>&1
 tail -n 50 aurora.log
 ```
 
@@ -158,8 +158,8 @@ Dodaj:
 SHELL=/bin/bash
 PATH=/usr/bin:/bin
 
-*/15 18-23,0-6 * * * cd /home/gohan/LLM/aurora_alert && /home/gohan/LLM/aurora_alert/.venv/bin/python aurora_alert.py >> aurora.log 2>&1
-0 7 * * * > /home/gohan/LLM/aurora_alert/aurora.log
+*/15 18-23,0-6 * * * cd /home/user/app/aurora_alert && /home/user/app/aurora_alert/.venv/bin/python aurora_alert.py >> aurora.log 2>&1
+0 7 * * * > /home/user/app/aurora_alert/aurora.log
 ```
 
 - linia 1: uruchamia skrypt co 15 min między 18:00–06:59
@@ -223,7 +223,7 @@ PEAK_WINDOW_HOURS=3
 
 ### Cron nie widzi `.env`
 Upewnij się, że w cronie jest:
-- `cd /home/gohan/LLM/aurora_alert`
+- `cd /home/user/app/aurora_alert`
 - używasz `.venv/bin/python`
 
 ### Brak forecast “okna obserwacyjnego”

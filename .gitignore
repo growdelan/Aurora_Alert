@@ -13,3 +13,4 @@ wheels/
 .env
 
 alert_state.json
+aurora.log

@@ -24,8 +24,24 @@ def parse_recipients(s: str) -> List[str]:
     return [p.strip() for p in (s or "").split(",") if p.strip()]
 
 
+
 def utc_now_ts() -> int:
     return int(datetime.now(timezone.utc).timestamp())
+
+
+# Human readable age string helper
+def age_str(dt_utc: Optional[datetime]) -> str:
+    """Human readable age like '5h 12m temu' for a UTC datetime."""
+    if dt_utc is None:
+        return "—"
+    delta = datetime.now(timezone.utc) - dt_utc
+    if delta.total_seconds() < 0:
+        return "—"
+    h = int(delta.total_seconds() // 3600)
+    m = int((delta.total_seconds() % 3600) // 60)
+    if h > 0:
+        return f"{h}h {m}m temu"
+    return f"{m}m temu"
 
 
 def load_state(path: str) -> dict:
@@ -46,7 +62,13 @@ def save_state(path: str, state: dict) -> None:
 
 
 def parse_noaa_time_utc(time_tag: str) -> Optional[datetime]:
-    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%MZ",
+    ):
         try:
             return datetime.strptime(time_tag, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
@@ -120,15 +142,35 @@ def send_gmail(
         server.send_message(msg, to_addrs=to_addrs)
 
 
+
 # -------------------- NOAA data sources --------------------
 KP_NOW_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
 KP_FORECAST_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"
+NOWCAST_URL = "https://services.swpc.noaa.gov/products/noaa-estimated-planetary-k-index-1-minute.json"
+
 
 
 def kp_now() -> Tuple[float, str]:
     data = fetch_json(KP_NOW_URL)
     last = data[-1]
     return float(last[1]), str(last[0])
+
+
+# Near real-time estimated planetary K index (1-minute)
+def kp_nowcast(url: str = NOWCAST_URL) -> Tuple[Optional[float], Optional[str]]:
+    """Near real-time estimated planetary K index (1-minute). Returns (kp, time_tag) or (None, None) if unavailable."""
+    try:
+        data = fetch_json(url)
+        # expected format: header row + rows like ["time_tag", "kp", ...]
+        rows = data[1:] if data and isinstance(data[0], list) else data
+        if not rows:
+            return None, None
+        last = rows[-1]
+        if not last or len(last) < 2:
+            return None, None
+        return float(last[1]), str(last[0])
+    except Exception:
+        return None, None
 
 
 def kp_forecast_max_next_hours(hours: int = 24) -> Tuple[float, str, Optional[datetime]]:
@@ -273,14 +315,25 @@ def pick_priority_emoji(
     send_forecast_flag: bool,
     now_gate_ok: bool,
     best_ok: bool,
+    nowcast_kp: Optional[float] = None,
 ) -> str:
-    # 🟢: right-now + good conditions
+    """Traffic-light priority.
+
+    Rules (highest first):
+    - 🟢 if NOWCAST >= 7.0 AND observation conditions now are OK (night + clouds).
+    - 🟢 if we are sending NOW and conditions now are OK.
+    - 🟡 if only forecast is firing and we have a good observation window.
+    - 🔴 otherwise.
+    """
+    if isinstance(nowcast_kp, (int, float)) and nowcast_kp >= 7.0 and now_gate_ok:
+        return "🟢"
+
     if send_now_flag and now_gate_ok:
         return "🟢"
-    # 🟡: forecast + best window available
+
     if (not send_now_flag) and send_forecast_flag and best_ok:
         return "🟡"
-    # fallback
+
     return "🔴"
 
 
@@ -296,6 +349,8 @@ def build_email_pro(
     send_forecast_flag: bool,
     kp_current: float,
     kp_current_time_utc_str: str,
+    nowcast_kp: Optional[float] = None,
+    nowcast_time_utc_str: Optional[str] = None,
     is_night_now: bool,
     cloud_now: int,
     meteo_time_now: Optional[str],
@@ -311,6 +366,13 @@ def build_email_pro(
     kp_now_dt = parse_noaa_time_utc(kp_current_time_utc_str)
     kp_now_local = utc_to_local_str(kp_now_dt, tz)
     kp_now_utc = kp_current_time_utc_str.replace(".000", "")
+
+    kp_now_age = age_str(kp_now_dt)
+
+    nowcast_dt = parse_noaa_time_utc(nowcast_time_utc_str) if nowcast_time_utc_str else None
+    nowcast_local = utc_to_local_str(nowcast_dt, tz) if nowcast_dt else "—"
+    nowcast_age = age_str(nowcast_dt) if nowcast_dt else "—"
+    nowcast_level, nowcast_emoji = kp_label(nowcast_kp) if isinstance(nowcast_kp, (int, float)) else ("—", "⚡")
 
     kp_peak_local = utc_to_local_str(kp_fc_dt_utc, tz)
     kp_peak_utc = kp_fc_time_utc_str
@@ -331,6 +393,7 @@ def build_email_pro(
         send_forecast_flag=send_forecast_flag,
         now_gate_ok=now_gate_ok,
         best_ok=best_ok,
+        nowcast_kp=nowcast_kp,
     )
 
     # Subject with traffic light + key numbers
@@ -361,7 +424,7 @@ Priorytet: {priority}
 
 ⚡ SYTUACJA TERAZ
 - Kp: {kp_current:.1f} ({now_level})
-- Czas pomiaru: {kp_now_local} (UTC: {kp_now_utc})
+- Czas pomiaru: {kp_now_local} ({kp_now_age}) (UTC: {kp_now_utc})
 - Warunki: {night_now_txt} {night_now_badge_txt}, chmury {cloud_now_txt} {cloud_now_badge_txt} (meteo: {meteo_now_local})
 
 🔮 PROGNOZA ({forecast_window_h}h)
@@ -372,8 +435,27 @@ Priorytet: {priority}
 ✨ REKOMENDACJA
 {recommendation}
 
-Źródła: NOAA SWPC (Kp), Open-Meteo (noc/chmury).
+Źródła: NOAA SWPC (Kp observed/forecast + nowcast), Open-Meteo (noc/chmury).
 """
+
+    # Conditionally insert NOWCAST line after time measurement in text_body
+    if nowcast_kp is not None and nowcast_dt is not None:
+        nowcast_line = (
+            f"- NOWCAST (est. 1-min): {nowcast_kp:.1f} ({nowcast_level}) · "
+            f"{nowcast_local} ({nowcast_age})\n"
+        )
+        marker = "- Czas pomiaru:"
+        if marker in text_body:
+            # Insert NOWCAST line right after the time measurement line
+            parts = text_body.split("\n")
+            out = []
+            inserted = False
+            for line in parts:
+                out.append(line)
+                if (not inserted) and line.startswith(marker):
+                    out.append(nowcast_line.rstrip("\n"))
+                    inserted = True
+            text_body = "\n".join(out)
 
     # HTML (inline CSS)
     def pill(text: str, bg: str, fg: str = "#111827") -> str:
@@ -385,6 +467,19 @@ Priorytet: {priority}
 
     now_gate_pill = pill("WARUNKI OK", "#DCFCE7") if now_gate_ok else pill("WARUNKI SŁABE", "#FEE2E2")
     best_pill = pill("IDEALNE OKNO", "#DCFCE7") if best_ok else pill("BRAK OKNA", "#FEE2E2")
+
+    nowcast_row_html = ""
+    if nowcast_kp is not None and nowcast_dt is not None:
+        nowcast_row_html = f"""
+                        <tr>
+                          <td style=\"padding:8px 0;color:#6b7280;font-size:12px;\">NOWCAST (est. 1-min)</td>
+                          <td style=\"padding:8px 0;color:#111827;font-size:13px;\">
+                            <b>{nowcast_kp:.1f}</b>
+                            <span style=\"color:#6b7280;\">&nbsp;({html_escape(nowcast_level)})</span>
+                            <span style=\"color:#6b7280;\">&nbsp;· {html_escape(nowcast_local)} ({html_escape(nowcast_age)})</span>
+                          </td>
+                        </tr>
+"""
 
     html_body = f"""\
 <!doctype html>
@@ -428,9 +523,11 @@ Priorytet: {priority}
                           <td style="padding:8px 0;color:#6b7280;font-size:12px;">Czas pomiaru</td>
                           <td style="padding:8px 0;color:#111827;font-size:13px;">
                             <b>{html_escape(kp_now_local)}</b>
+                            <span style="color:#6b7280;">&nbsp;({html_escape(kp_now_age)})</span>
                             <span style="color:#6b7280;">&nbsp;· UTC: {html_escape(kp_now_utc)}</span>
                           </td>
                         </tr>
+{nowcast_row_html}
                         <tr>
                           <td style="padding:8px 0;color:#6b7280;font-size:12px;">Warunki (teraz)</td>
                           <td style="padding:8px 0;color:#111827;font-size:13px;">
@@ -495,7 +592,7 @@ Priorytet: {priority}
                     <td style="padding:14px 16px;border-radius:14px;background:#0b1220;color:#dbeafe;">
                       <div style="font-size:12px;opacity:0.9;">Źródła</div>
                       <div style="font-size:12px;opacity:0.85;line-height:1.35;margin-top:4px;">
-                        NOAA SWPC (Kp) · Open-Meteo (noc/chmury)
+                        NOAA SWPC (Kp observed/forecast + nowcast) · Open-Meteo (noc/chmury)
                       </div>
                       <div style="font-size:11px;opacity:0.75;margin-top:10px;">
                         Uwaga: prognozy zorzy są probabilistyczne. Najlepszy efekt uzyskasz w miejscach z ciemnym niebem.
@@ -538,6 +635,10 @@ def main():
     forecast_window_h = int(os.getenv("FORECAST_WINDOW_HOURS", "24"))
     peak_window_h = int(os.getenv("PEAK_WINDOW_HOURS", "2"))
 
+    nowcast_enabled = (
+        os.getenv("NOWCAST_ENABLED", os.getenv("NOWCAST_ENABLE", "0")).strip() == "1"
+    )
+
     state_file = os.getenv("STATE_FILE", "alert_state.json")
 
     if not gmail_user or not gmail_app_password:
@@ -554,6 +655,10 @@ def main():
     # NOAA Kp
     kp_current, kp_current_time = kp_now()
     kp_fc_max, kp_fc_time, kp_fc_dt = kp_forecast_max_next_hours(forecast_window_h)
+    nowcast_kp: Optional[float] = None
+    nowcast_time: Optional[str] = None
+    if nowcast_enabled:
+        nowcast_kp, nowcast_time = kp_nowcast()
 
     send_now_flag = False
     send_forecast_flag = False
@@ -603,6 +708,8 @@ def main():
         send_forecast_flag=send_forecast_flag,
         kp_current=kp_current,
         kp_current_time_utc_str=kp_current_time,
+        nowcast_kp=nowcast_kp,
+        nowcast_time_utc_str=nowcast_time,
         is_night_now=is_night_now,
         cloud_now=cloud_now,
         meteo_time_now=meteo_time_now,

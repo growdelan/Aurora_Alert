@@ -435,20 +435,12 @@ def pick_priority_emoji(
     """Traffic-light priority.
 
     Rules (highest first):
-    - 🟢 if NOWCAST >= 7.0 AND observation conditions now are OK (night + clouds).
-    - 🟢 if we are sending NOW and conditions now are OK.
-    - 🟡 if only forecast is firing and we have a good observation window.
+    - 🟢 if we are sending NOWCAST alert AND observation conditions now are OK (night + clouds).
     - 🔴 otherwise.
     """
-    if isinstance(nowcast_kp, (int, float)) and nowcast_kp >= 7.0 and now_gate_ok:
-        return "🟢"
-
+    # send_now_flag means "send NOWCAST"
     if send_now_flag and now_gate_ok:
         return "🟢"
-
-    if (not send_now_flag) and send_forecast_flag and best_ok:
-        return "🟡"
-
     return "🔴"
 
 
@@ -458,10 +450,7 @@ def build_email_pro(
     lon: float,
     tz: str,
     max_cloud: int,
-    forecast_window_h: int,
-    peak_window_h: int,
     send_now_flag: bool,
-    send_forecast_flag: bool,
     kp_current: float,
     kp_current_time_utc_str: str,
     nowcast_kp: Optional[float] = None,
@@ -469,14 +458,8 @@ def build_email_pro(
     is_night_now: bool,
     cloud_now: int,
     meteo_time_now: Optional[str],
-    kp_fc_max: float,
-    kp_fc_time_utc_str: str,
-    kp_fc_dt_utc: Optional[datetime],
-    best_cloud: Optional[int],
-    best_time_local: Optional[str],
 ) -> Tuple[str, str, str]:
     now_level, now_emoji = kp_label(kp_current)
-    fc_level, fc_emoji = kp_label(kp_fc_max if kp_fc_max >= 0 else 0.0)
 
     kp_now_dt = parse_noaa_time_utc(kp_current_time_utc_str)
     kp_now_local = utc_to_local_str(kp_now_dt, tz)
@@ -489,42 +472,33 @@ def build_email_pro(
     nowcast_age = age_str(nowcast_dt) if nowcast_dt else "—"
     nowcast_level, nowcast_emoji = kp_label(nowcast_kp) if isinstance(nowcast_kp, (int, float)) else ("—", "⚡")
 
-    kp_peak_local = utc_to_local_str(kp_fc_dt_utc, tz)
-    kp_peak_utc = kp_fc_time_utc_str
-
     meteo_now_local = local_time_str_from_openmeteo(meteo_time_now)
 
     night_now_txt, night_now_badge_txt = night_badge(is_night_now)
     cloud_now_txt, cloud_now_badge_txt = cloud_badge(cloud_now, max_cloud)
 
-    best_time_local_txt = local_time_str_from_openmeteo(best_time_local)
-    best_cloud_txt, best_cloud_badge_txt = cloud_badge(best_cloud, max_cloud)
-
     now_gate_ok = (is_night_now and cloud_now <= max_cloud)
-    best_ok = (best_time_local is not None and best_cloud is not None and best_cloud <= max_cloud)
+    best_ok = False
 
     priority = pick_priority_emoji(
         send_now_flag=send_now_flag,
-        send_forecast_flag=send_forecast_flag,
+        send_forecast_flag=False,
         now_gate_ok=now_gate_ok,
         best_ok=best_ok,
         nowcast_kp=nowcast_kp,
     )
 
     # Subject with traffic light + key numbers
-    if send_now_flag and send_forecast_flag:
-        subject = f"{priority} Zorza Wałbrzych — NOW Kp{kp_current:.1f} · Fc Kp{kp_fc_max:.1f}"
-    elif send_now_flag:
-        subject = f"{priority} Zorza Wałbrzych — NOW Kp{kp_current:.1f}"
+    # In this mode, we send only NOWCAST alerts; include NOWCAST if present.
+    if isinstance(nowcast_kp, (int, float)):
+        subject = f"{priority} Zorza Wałbrzych — TERAZ (NOWCAST) Kp{nowcast_kp:.1f}"
     else:
-        subject = f"{priority} Zorza Wałbrzych — Forecast Kp{kp_fc_max:.1f}"
+        subject = f"{priority} Zorza Wałbrzych — TERAZ (NOWCAST)"
 
     # Recommendation
     rec_lines = []
     if send_now_flag and now_gate_ok:
         rec_lines.append("Wyjdź teraz: warunki są sprzyjające.")
-    if send_forecast_flag and best_ok:
-        rec_lines.append(f"Najlepsze okno: {best_time_local_txt} (chmury {best_cloud_txt}).")
     if not rec_lines:
         rec_lines.append("Sprawdź północne niebo z dala od świateł miasta.")
     recommendation = " ".join(rec_lines)
@@ -542,15 +516,10 @@ Priorytet: {priority}
 - Czas pomiaru: {kp_now_local} ({kp_now_age}) (UTC: {kp_now_utc})
 - Warunki: {night_now_txt} {night_now_badge_txt}, chmury {cloud_now_txt} {cloud_now_badge_txt} (meteo: {meteo_now_local})
 
-🔮 PROGNOZA ({forecast_window_h}h)
-- Max Kp: {kp_fc_max:.1f} ({fc_level})
-- Peak: {kp_peak_local} (UTC: {kp_peak_utc})
-- Najlepsze okno (±{peak_window_h}h): {best_time_local_txt} | chmury {best_cloud_txt} {best_cloud_badge_txt}
-
 ✨ REKOMENDACJA
 {recommendation}
 
-Źródła: NOAA SWPC (Kp observed/forecast + nowcast), Open-Meteo (noc/chmury).
+Źródła: NOAA SWPC (Kp observed + nowcast), Open-Meteo (noc/chmury).
 """
 
     # Conditionally insert NOWCAST line after time measurement in text_body
@@ -577,11 +546,9 @@ Priorytet: {priority}
         return f"""<span style="display:inline-block;padding:6px 10px;border-radius:999px;background:{bg};color:{fg};font-weight:600;font-size:12px;line-height:1;">{html_escape(text)}</span>"""
 
     now_pill = pill(f"{now_emoji} {now_level}", "#DCFCE7") if kp_current >= 6 else pill(f"{now_emoji} {now_level}", "#E5E7EB")
-    fc_pill = pill(f"{fc_emoji} {fc_level}", "#DBEAFE") if kp_fc_max >= 6 else pill(f"{fc_emoji} {fc_level}", "#E5E7EB")
     prio_pill = pill(f"{priority} PRIORYTET", "#111827", "#ffffff")
 
     now_gate_pill = pill("WARUNKI OK", "#DCFCE7") if now_gate_ok else pill("WARUNKI SŁABE", "#FEE2E2")
-    best_pill = pill("IDEALNE OKNO", "#DCFCE7") if best_ok else pill("BRAK OKNA", "#FEE2E2")
 
     nowcast_row_html = ""
     if nowcast_kp is not None and nowcast_dt is not None:
@@ -609,7 +576,7 @@ Priorytet: {priority}
                 <div style="font-size:12px;letter-spacing:0.14em;text-transform:uppercase;opacity:0.8;">Aurora Alert</div>
                 <div style="font-size:22px;font-weight:800;margin-top:6px;line-height:1.2;">🌌 Zorza — Wałbrzych</div>
                 <div style="margin-top:10px;">
-                  {prio_pill}&nbsp; {now_pill}&nbsp; {fc_pill}&nbsp; {now_gate_pill}
+                  {prio_pill}&nbsp; {now_pill}&nbsp; {now_gate_pill}
                 </div>
                 <div style="margin-top:14px;font-size:13px;opacity:0.85;">
                   Lokalizacja: <b>{lat:.2f} N</b>, <b>{lon:.2f} E</b> · Strefa: <b>{html_escape(tz)}</b>
@@ -658,47 +625,12 @@ Priorytet: {priority}
 
                   <tr>
                     <td style="padding:16px;border:1px solid #e5e7eb;border-radius:14px;background:#ffffff;">
-                      <div style="display:flex;justify-content:space-between;align-items:center;">
-                        <div style="font-size:14px;font-weight:800;color:#111827;">🔮 Prognoza</div>
-                        <div style="font-size:12px;color:#6b7280;">okno: {forecast_window_h}h</div>
+                      <div style="font-size:12px;color:#6b7280;margin-bottom:6px;">✨ Rekomendacja</div>
+                      <div style="font-size:14px;color:#111827;font-weight:700;line-height:1.35;">
+                        {html_escape(recommendation)}
                       </div>
-
-                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:10px;">
-                        <tr>
-                          <td style="padding:8px 0;color:#6b7280;font-size:12px;width:42%;">Maksymalny Kp</td>
-                          <td style="padding:8px 0;color:#111827;font-size:14px;font-weight:800;">
-                            {kp_fc_max:.1f} <span style="font-size:12px;font-weight:700;color:#6b7280;">({html_escape(fc_level)})</span>
-                          </td>
-                        </tr>
-                        <tr>
-                          <td style="padding:8px 0;color:#6b7280;font-size:12px;">Peak burzy</td>
-                          <td style="padding:8px 0;color:#111827;font-size:13px;">
-                            <b>{html_escape(kp_peak_local)}</b>
-                            <span style="color:#6b7280;">&nbsp;· UTC: {html_escape(kp_peak_utc)}</span>
-                          </td>
-                        </tr>
-                        <tr>
-                          <td style="padding:8px 0;color:#6b7280;font-size:12px;">Okno obserwacyjne</td>
-                          <td style="padding:8px 0;color:#111827;font-size:13px;">
-                            {best_pill}
-                            <span style="display:inline-block;margin-left:10px;">
-                              🕒 <b>{html_escape(best_time_local_txt)}</b>
-                              &nbsp;&nbsp;|&nbsp;&nbsp;
-                              ☁️ <b>{html_escape(best_cloud_txt)}</b> {best_cloud_badge_txt}
-                              <span style="color:#6b7280;">&nbsp;(±{peak_window_h}h)</span>
-                            </span>
-                          </td>
-                        </tr>
-                      </table>
-
-                      <div style="margin-top:12px;padding:12px 14px;border-radius:12px;background:#f8fafc;border:1px solid #e5e7eb;">
-                        <div style="font-size:12px;color:#6b7280;margin-bottom:6px;">✨ Rekomendacja</div>
-                        <div style="font-size:14px;color:#111827;font-weight:700;line-height:1.35;">
-                          {html_escape(recommendation)}
-                        </div>
-                        <div style="margin-top:8px;font-size:12px;color:#6b7280;line-height:1.35;">
-                          Wskazówka: patrz na północ, najlepiej z dala od świateł miasta. Daj oczom 10–15 min adaptacji.
-                        </div>
+                      <div style="margin-top:8px;font-size:12px;color:#6b7280;line-height:1.35;">
+                        Wskazówka: patrz na północ, najlepiej z dala od świateł miasta. Daj oczom 10–15 min adaptacji.
                       </div>
                     </td>
                   </tr>
@@ -707,7 +639,7 @@ Priorytet: {priority}
                     <td style="padding:14px 16px;border-radius:14px;background:#0b1220;color:#dbeafe;">
                       <div style="font-size:12px;opacity:0.9;">Źródła</div>
                       <div style="font-size:12px;opacity:0.85;line-height:1.35;margin-top:4px;">
-                        NOAA SWPC (Kp observed/forecast + nowcast) · Open-Meteo (noc/chmury)
+                        NOAA SWPC (Kp observed + nowcast) · Open-Meteo (noc/chmury)
                       </div>
                       <div style="font-size:11px;opacity:0.75;margin-top:10px;">
                         Uwaga: prognozy zorzy są probabilistyczne. Najlepszy efekt uzyskasz w miejscach z ciemnym niebem.
@@ -741,14 +673,11 @@ def main():
     lon = float(os.getenv("LON", "16.28"))
     tz = os.getenv("TZ", "Europe/Warsaw")
 
-    now_min_kp = float(os.getenv("NOW_MIN_KP", "6.0"))
-    forecast_min_kp = float(os.getenv("FORECAST_MIN_KP", "6.0"))
+    # In "NOWCAST-only" mode we alert only on near-real-time nowcast.
+    nowcast_min_kp = float(os.getenv("NOWCAST_MIN_KP", "7.0"))
     max_cloud = int(os.getenv("MAX_CLOUDCOVER", "70"))
 
-    now_cd = int(os.getenv("NOW_COOLDOWN_SECONDS", "7200"))
-    forecast_cd = int(os.getenv("FORECAST_COOLDOWN_SECONDS", "21600"))
-    forecast_window_h = int(os.getenv("FORECAST_WINDOW_HOURS", "24"))
-    peak_window_h = int(os.getenv("PEAK_WINDOW_HOURS", "2"))
+    nowcast_cd = int(os.getenv("NOWCAST_COOLDOWN_SECONDS", os.getenv("NOW_COOLDOWN_SECONDS", "7200")))
 
     nowcast_enabled = (
         os.getenv("NOWCAST_ENABLED", os.getenv("NOWCAST_ENABLE", "0")).strip() == "1"
@@ -767,59 +696,46 @@ def main():
     # NOW gate
     is_night_now, cloud_now, meteo_time_now = meteo_gate_now(lat, lon, tz)
 
-    # NOAA Kp
+    # NOAA Kp (observed) - kept for context in the email
     kp_current, kp_current_time = kp_now()
-    kp_fc_max, kp_fc_time, kp_fc_dt = kp_forecast_max_next_hours(forecast_window_h)
     nowcast_kp: Optional[float] = None
     nowcast_time: Optional[str] = None
     if nowcast_enabled:
         nowcast_kp, nowcast_time = kp_nowcast()
-    send_now_flag = False
-    send_forecast_flag = False
-    best_cloud: Optional[int] = None
-    best_time_local: Optional[str] = None
+    send_nowcast_flag = False
 
-    # NOW decision
-    if kp_current >= now_min_kp:
-        if is_night_now and cloud_now <= max_cloud:
-            if can_send_now(state, "NOW", now_cd, now_ts):
-                send_now_flag = True
-            else:
-                print(f"NOW: spełnione (Kp={kp_current:.1f}), cooldown aktywny.")
-        else:
-            print(f"NOW: Kp spełnione (Kp={kp_current:.1f}), ale gate blokuje (dzień/chmury).")
-
-    # FORECAST decision
-    if kp_fc_max >= forecast_min_kp and kp_fc_dt is not None:
-        ok, best_cloud, best_time_local = meteo_best_slot_around_peak(
-            lat=lat,
-            lon=lon,
-            tz=tz,
-            peak_dt_utc=kp_fc_dt,
-            window_hours=peak_window_h,
-            max_cloud=max_cloud,
-        )
-        if ok:
-            if should_send_forecast(state, kp_fc_time, now_ts, forecast_cd):
-                send_forecast_flag = True
-            else:
-                print(f"FORECAST: spełnione (peak {kp_fc_time}), cooldown/dedupe aktywne.")
-        else:
-            print(f"FORECAST: brak okna noc+chmury<= {max_cloud}% w ±{peak_window_h}h (peak {kp_fc_time} UTC).")
-
-    if not (send_now_flag or send_forecast_flag):
+    # NOWCAST-only decision
+    if not isinstance(nowcast_kp, (int, float)):
+        print("NOWCAST: brak danych (None).")
         print("✅ Brak nowych alertów do wysłania.")
         return
+
+    if nowcast_kp < nowcast_min_kp:
+        print(f"NOWCAST: za nisko (NOWCAST={nowcast_kp:.1f} < {nowcast_min_kp:.1f}).")
+        print("✅ Brak nowych alertów do wysłania.")
+        return
+
+    if not (is_night_now and cloud_now <= max_cloud):
+        print(
+            f"NOWCAST: spełnione (NOWCAST={nowcast_kp:.1f} >= {nowcast_min_kp:.1f}), "
+            "ale gate blokuje (dzień/chmury)."
+        )
+        print("✅ Brak nowych alertów do wysłania.")
+        return
+
+    if not can_send_now(state, "NOWCAST", nowcast_cd, now_ts):
+        print(f"NOWCAST: spełnione (NOWCAST={nowcast_kp:.1f}), cooldown aktywny.")
+        print("✅ Brak nowych alertów do wysłania.")
+        return
+
+    send_nowcast_flag = True
 
     subject, text_body, html_body = build_email_pro(
         lat=lat,
         lon=lon,
         tz=tz,
         max_cloud=max_cloud,
-        forecast_window_h=forecast_window_h,
-        peak_window_h=peak_window_h,
-        send_now_flag=send_now_flag,
-        send_forecast_flag=send_forecast_flag,
+        send_now_flag=send_nowcast_flag,
         kp_current=kp_current,
         kp_current_time_utc_str=kp_current_time,
         nowcast_kp=nowcast_kp,
@@ -827,11 +743,6 @@ def main():
         is_night_now=is_night_now,
         cloud_now=cloud_now,
         meteo_time_now=meteo_time_now,
-        kp_fc_max=kp_fc_max,
-        kp_fc_time_utc_str=kp_fc_time,
-        kp_fc_dt_utc=kp_fc_dt,
-        best_cloud=best_cloud,
-        best_time_local=best_time_local,
     )
 
     send_gmail(
@@ -843,11 +754,8 @@ def main():
         html_body=html_body,
     )
 
-    if send_now_flag:
-        mark_sent(state, "NOW", now_ts)
-    if send_forecast_flag:
-        mark_sent(state, "FORECAST", now_ts)
-        mark_forecast_peak(state, kp_fc_time)
+    if send_nowcast_flag:
+        mark_sent(state, "NOWCAST", now_ts)
 
     save_state(state_file, state)
     print(f"📧 Wysłano alert do: {', '.join(recipients)} | Subject: {subject}")
@@ -855,3 +763,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

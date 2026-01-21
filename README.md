@@ -1,10 +1,10 @@
-# Aurora Alert (Miasto / PL) — NOAA Kp + Forecast + Meteo Gate + Gmail (HTML)
+# Aurora Alert (Miasto / PL) — NOAA Kp + Nowcast + Meteo Gate + Gmail (HTML)
 
 Mały, “produkcyjny” skrypt w Pythonie do wysyłania **alertów o szansach na zorzę** dla konkretnej lokalizacji, z **profesjonalnym mailem HTML**.
 
 Skrypt cyklicznie pobiera:
-- **NOAA SWPC**: Kp (observed) + Kp (forecast)
-- **Open-Meteo**: `is_day` + `cloud_cover` (teraz oraz prognoza godzinowa pod peak)
+- **NOAA SWPC**: Kp (observed) + Kp (nowcast, 1-min)
+- **Open-Meteo**: `is_day` + `cloud_cover` (teraz)
 
 Następnie wysyła maila przez **Gmail SMTP** (App Password) jeśli warunki są sensowne do obserwacji.
 
@@ -12,33 +12,25 @@ Następnie wysyła maila przez **Gmail SMTP** (App Password) jeśli warunki są 
 
 ## Funkcje
 
-- ✅ **NOW alert**: gdy *burza już trwa* (Kp ≥ próg) **i** jest noc + chmury ≤ próg
-- ✅ **FORECAST alert**: gdy *prognoza w oknie X godzin* ma Kp ≥ próg **i** istnieje **najlepsze okno obserwacyjne** w zakresie **±N godzin wokół peaku** (noc + chmury OK)
-- ✅ **Cool-down** osobno dla NOW i FORECAST (żeby nie spamować)
-- ✅ **Dedupe forecast**: nie powtarza tego samego peaku (o ile działa cooldown)
+- ✅ **NOWCAST alert**: gdy *teraz* (NOWCAST) Kp ≥ próg **i** jest noc + chmury ≤ próg
+- ✅ **Cool-down** dla NOWCAST (żeby nie spamować)
 - ✅ Konfiguracja przez **`.env`**
 - ✅ **HTML PRO** mail + fallback tekstowy
-- ✅ “Semafor” w temacie: 🟢/🟡/🔴
+- ✅ “Semafor” w temacie: 🟢/🔴
 
 ---
 
 ## Jak działa logika alertów
 
-### NOW (burza trwa teraz)
-Mail NOW poleci, gdy spełnione są wszystkie:
-- `Kp_now >= NOW_MIN_KP`
+### NOWCAST (teraz, est. 1-min)
+Mail NOWCAST poleci, gdy spełnione są wszystkie:
+- `NOWCAST_ENABLED=1`
+- `Kp_nowcast >= NOWCAST_MIN_KP`
 - **noc teraz** (`is_day == 0` w Open-Meteo)
 - `cloud_cover <= MAX_CLOUDCOVER`
-- minął `NOW_COOLDOWN_SECONDS`
+- minął `NOWCAST_COOLDOWN_SECONDS`
 
-### FORECAST (szansa w prognozie)
-Mail FORECAST poleci, gdy spełnione są wszystkie:
-- w prognozie NOAA: `max(Kp_forecast w oknie FORECAST_WINDOW_HOURS) >= FORECAST_MIN_KP`
-- dla czasu peaku istnieje **co najmniej jedna godzina w ±PEAK_WINDOW_HOURS**, w której:
-  - jest noc (`is_day == 0`)
-  - `cloud_cover <= MAX_CLOUDCOVER`
-- minął `FORECAST_COOLDOWN_SECONDS`
-- deduplikacja peaku pozwala na wysyłkę (peak time się zmienił albo minął cooldown)
+> Kp observed jest używany informacyjnie w mailu (kontekst), ale nie steruje wysyłką.
 
 ---
 
@@ -61,13 +53,15 @@ cd /home/user/app/aurora_alert
 # wrzuć tu aurora_alert.py + README.md
 ```
 
-### 2) Virtualenv
+### 2) Środowisko (UV)
 
 ```bash
-python3 -m venv .venv
+uv sync
+```
+
+Opcjonalnie aktywacja:
+```bash
 source .venv/bin/activate
-pip install --upgrade pip
-pip install python-dotenv
 ```
 
 ---
@@ -90,17 +84,12 @@ LON=17.02
 TZ=Europe/Warsaw
 
 # --- Progi ---
-NOW_MIN_KP=6.0
-FORECAST_MIN_KP=6.0
+NOWCAST_MIN_KP=7.0
 MAX_CLOUDCOVER=70
 
 # --- Częstotliwość / anty-spam ---
-NOW_COOLDOWN_SECONDS=7200
-FORECAST_COOLDOWN_SECONDS=21600
-
-# --- Okna czasowe forecastu ---
-FORECAST_WINDOW_HOURS=24
-PEAK_WINDOW_HOURS=2
+NOWCAST_COOLDOWN_SECONDS=7200
+NOWCAST_ENABLED=1
 
 # --- Plik stanu (pamięć wysłanych alertów) ---
 STATE_FILE=alert_state.json
@@ -120,13 +109,13 @@ W Gmailu użyj **App Password** zamiast normalnego hasła:
 
 ```bash
 cd /home/user/app/aurora_alert
-/home/user/app/aurora_alert/.venv/bin/python aurora_alert.py
+uv run aurora_alert.py
 ```
 
 Jeśli chcesz zapisać output do loga jak cron:
 
 ```bash
-/home/user/app/aurora_alert/.venv/bin/python aurora_alert.py >> aurora.log 2>&1
+uv run aurora_alert.py >> aurora.log 2>&1
 tail -n 50 aurora.log
 ```
 
@@ -134,8 +123,8 @@ tail -n 50 aurora.log
 Na czas testu możesz ustawić w `.env`:
 
 ```env
-NOW_MIN_KP=1
-FORECAST_MIN_KP=1
+NOWCAST_MIN_KP=1
+NOWCAST_ENABLED=1
 MAX_CLOUDCOVER=100
 ```
 
@@ -158,7 +147,7 @@ Dodaj:
 SHELL=/bin/bash
 PATH=/usr/bin:/bin
 
-*/15 18-23,0-6 * * * cd /home/user/app/aurora_alert && /home/user/app/aurora_alert/.venv/bin/python aurora_alert.py >> aurora.log 2>&1
+*/15 18-23,0-6 * * * cd /home/user/app/aurora_alert && uv run aurora_alert.py >> aurora.log 2>&1
 0 7 * * * > /home/user/app/aurora_alert/aurora.log
 ```
 
@@ -191,23 +180,16 @@ TZ=...
 ### Twardsze progi dla Polski
 Często sensowne:
 ```env
-NOW_MIN_KP=6.5
-FORECAST_MIN_KP=6.5
+NOWCAST_MIN_KP=7.0
 MAX_CLOUDCOVER=60
-```
-
-### Zmiana “okna” obserwacyjnego wokół peaku
-```env
-PEAK_WINDOW_HOURS=3
 ```
 
 ---
 
 ## Jak interpretować temat maila (semafor)
 
-- 🟢 — “wyjdź teraz / warunki bardzo dobre” (NOW + noc + chmury OK)
-- 🟡 — “przygotuj się” (forecast + znalezione okno obserwacyjne)
-- 🔴 — fallback (zwykle nie występuje przy obecnych gate’ach; zostawione na wypadek zmian)
+- 🟢 — “wyjdź teraz / warunki bardzo dobre” (NOWCAST + noc + chmury OK)
+- 🔴 — fallback (nie powinno występować przy spełnionych warunkach wysyłki)
 
 ---
 
@@ -224,15 +206,17 @@ PEAK_WINDOW_HOURS=3
 ### Cron nie widzi `.env`
 Upewnij się, że w cronie jest:
 - `cd /home/user/app/aurora_alert`
-- używasz `.venv/bin/python`
+- używasz `uv run`
 
-### Brak forecast “okna obserwacyjnego”
-To oznacza, że w ±`PEAK_WINDOW_HOURS` od peaku:
-- jest dzień lub
-- zachmurzenie przekracza `MAX_CLOUDCOVER`
+### NOWCAST nie wysyła mimo wysokiego Kp
+Sprawdź:
+- czy `NOWCAST_ENABLED=1`
+- czy jest noc i `cloud_cover <= MAX_CLOUDCOVER`
+- czy nie działa `NOWCAST_COOLDOWN_SECONDS`
 
 ---
 
 ## Źródła danych
-- NOAA SWPC: planetary K-index (observed + forecast)
-- Open-Meteo: `is_day`, `cloud_cover` (current + hourly)
+- NOAA SWPC: planetary K-index (observed + nowcast)
+- Open-Meteo: `is_day`, `cloud_cover` (current)
+

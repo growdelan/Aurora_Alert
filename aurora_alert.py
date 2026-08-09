@@ -160,11 +160,40 @@ KP_FORECAST_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-inde
 NOWCAST_URL = "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json"
 
 
+def parse_kp_record(record) -> Tuple[float, str]:
+    """Return ``(kp, time_tag)`` from current or legacy NOAA records.
+
+    NOAA product feeds currently return dictionaries, while their previous
+    format used two-element rows (time, Kp). Supporting both formats keeps the
+    alert working with archived responses and during API format transitions.
+    """
+    if isinstance(record, dict):
+        time_tag = record.get("time_tag")
+        kp_value = record.get("Kp")
+        if kp_value is None:
+            kp_value = record.get("kp")
+    elif isinstance(record, (list, tuple)) and len(record) >= 2:
+        time_tag, kp_value = record[0], record[1]
+    else:
+        raise ValueError(f"Nieobsługiwany format rekordu NOAA Kp: {type(record).__name__}")
+
+    if time_tag is None or kp_value is None:
+        raise ValueError("Rekord NOAA Kp nie zawiera pól time_tag i Kp/kp")
+
+    try:
+        kp = float(kp_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Nieprawidłowa wartość NOAA Kp: {kp_value!r}") from exc
+
+    return kp, str(time_tag)
+
+
 
 def kp_now() -> Tuple[float, str]:
     data = fetch_json(KP_NOW_URL)
-    last = data[-1]
-    return float(last[1]), str(last[0])
+    if not isinstance(data, list) or not data:
+        raise ValueError("NOAA Kp zwróciło pustą lub nieprawidłową odpowiedź")
+    return parse_kp_record(data[-1])
 
 
 # Near real-time estimated planetary K index (1-minute)
@@ -290,6 +319,11 @@ def kp_nowcast(url: str = NOWCAST_URL) -> Tuple[Optional[float], Optional[str]]:
 
 def kp_forecast_max_next_hours(hours: int = 24) -> Tuple[float, str, Optional[datetime]]:
     data = fetch_json(KP_FORECAST_URL)
+    if not isinstance(data, list) or not data:
+        raise ValueError("Prognoza NOAA Kp zwróciła pustą lub nieprawidłową odpowiedź")
+
+    # The legacy response started with a header row. The current response is a
+    # list of dictionaries and has no header.
     rows = data[1:] if isinstance(data[0], list) else data
 
     now = datetime.now(timezone.utc)
@@ -298,20 +332,17 @@ def kp_forecast_max_next_hours(hours: int = 24) -> Tuple[float, str, Optional[da
     best_dt = None
 
     for row in rows:
-        if not row or len(row) < 2:
+        try:
+            kp, time_tag = parse_kp_record(row)
+        except ValueError:
             continue
-        time_tag = str(row[0])
+
         dt = parse_noaa_time_utc(time_tag)
         if dt is None:
             continue
 
         delta_h = (dt - now).total_seconds() / 3600.0
         if delta_h < 0 or delta_h > hours:
-            continue
-
-        try:
-            kp = float(row[1])
-        except Exception:
             continue
 
         if kp > best_kp:
